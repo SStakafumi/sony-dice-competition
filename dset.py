@@ -52,8 +52,11 @@ def getImageInfoList():
     # 画像のラベル(目の合計)をまとめたリスト
     labels = []
 
-    # 想定していない画像(label>6)
-    labels_exception = []
+    # 想定外の画像(label>6)
+    labels_unexp = []
+
+    # サイコロが一つで割れているため検出できない場合
+    labels_undetect = []
 
     for i in range(X_train.shape[0]):
     
@@ -67,14 +70,17 @@ def getImageInfoList():
         # サイコロのrect情報を格納するリスト
         dice_rect = []
         for j, size_tmp in enumerate(rect_size):
-            if (80 <= size_tmp[0] <= 150) and (80 <= size_tmp[1] <= 150):
+            if (85 <= size_tmp[0] <= 150) and (85 <= size_tmp[1] <= 150):
                 dice_rect.append(j)
         
+        if dice_rect == []:
+            labels_undetect.append(i)
+
         # サイコロの数が1つだったら学習データとしてカウント
         if len(dice_rect) == 1:
             center, size, angle = tuple(map(int, rect_center[dice_rect[0]])), tuple(map(int, rect_size[dice_rect[0]])), rect_angle[dice_rect[0]]
             if y_train[i] > 6:
-                labels_exception.append(i)
+                labels_unexp.append(i)
                 continue
             else:
                 labels.append(y_train[i])
@@ -98,7 +104,7 @@ def getImageInfoList():
 
         imgs.append(img)
 
-    return imgs, labels, labels_exception
+    return imgs, labels, labels_unexp, labels_undetect
 
 # class ImageDataset(Dataset):
 #     def __init__(self, data_type):
