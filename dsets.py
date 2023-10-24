@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore')
 
 
 # 定数設定
-IMAGE_ONE_DICE_SIZE = 128 # 一つのサイコロの最終的な画像のサイズ
+IMAGE_ONE_DICE_SIZE = 32 # 一つのサイコロの最終的な画像のサイズ
 IMAGE_EXPAND_SIZE = 256 # 20x20pixから拡大処理(otsu resize)するサイズ
 ONE_DICE_THRESHOLD = 12000
 
@@ -236,7 +236,7 @@ def getOneDiceImageInfoListFromArea():
         # resize lanczos
         img = cv2.resize(img, (IMAGE_ONE_DICE_SIZE, IMAGE_ONE_DICE_SIZE), interpolation=cv2.INTER_LANCZOS4)
 
-        imgs.append(img)
+        imgs.append(img.astype(np.uint8))
         labels.append(y_train[img_idx])
 
     return one_dice_idx, imgs, labels
@@ -267,3 +267,61 @@ def getOneDiceRotate90():
 
     return imgs_x4, labels_x4
 
+
+def myTransformer(img, label, data_type):
+    if data_type == 'trn':
+        img_transformer = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.73473), (0.42428))
+        ])
+    elif data_type == 'val':
+        img_transformer = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.73464), (0.42431))
+        ])
+    
+    img_t = img_transformer(img)
+    # onehot encodingで返す
+    label_t = torch.zeros(6, dtype=torch.long)
+    label_t[int(label-1)] = 1.0
+
+    return img_t, label_t
+
+
+
+class ImageDataset(Dataset):
+    '''Dataset クラス
+    Attributes:
+        data_type: Dataset のタイプ, 'trn', 'val', 'test'
+    '''
+    def __init__(self, data_type):
+        self.data_type = data_type
+        assert data_type in ['trn', 'val'], 'データタイプが想定外です'
+        imgs, labels = getOneDiceRotate90()
+
+        trn_imgs, val_imgs, trn_labels, val_labels = \
+            train_test_split(imgs, labels, train_size=0.8, stratify=labels, random_state=1)
+        
+        if data_type == 'trn':
+            self.imgs = trn_imgs
+            self.labels = trn_labels
+        elif data_type == 'val':
+            self.imgs = val_imgs
+            self.labels = val_labels
+        
+    def __len__(self):
+        return len(self.imgs)
+    
+    def __getitem__(self, idx):
+        if self.data_type == 'trn':
+            img = self.imgs[idx]
+            img = img.astype(np.unit8)
+            label = self.labels[idx]
+            img_t, label_t = myTransformer(img, label, self.data_type)
+        elif self.data_type == 'val':
+            img = self.imgs[idx]
+            img = img.astype(np.unit8)
+            label = self.labels[idx]
+            img_t, label_t = myTransformer(img, label, self.data_type)
+        
+        return img_t, label_t
