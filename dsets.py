@@ -1,24 +1,15 @@
-import copy
-import csv
-import functools
-import math
-import os
 import random
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from glob import glob
 import warnings
 import random
 import cv2
 from collections import namedtuple
 from sklearn.model_selection import train_test_split
+from sklearn.cluster import SpectralClustering
 from torchvision import transforms
-from PIL import Image
 
 import torch
 import torch.cuda
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch import nn as nn
 
@@ -30,17 +21,19 @@ warnings.filterwarnings('ignore')
 IMAGE_ONE_DICE_SIZE = 32 # 一つのサイコロの最終的な画像のサイズ
 IMAGE_EXPAND_SIZE = 256 # 20x20pixから拡大処理(otsu resize)するサイズ
 ONE_DICE_THRESHOLD = 12000
+# TEST_DATA_SIZE = 1000 # テスト用全部読み込んでると時間がもったいないため
 
 # 画像データ読み込み
 X_train = np.load('/mnt/c/Users/user/MyData/SonyDice/X_train.npy')
 X_train = np.reshape(X_train, [200000, 20, 20])
+# X_train = X_train[:TEST_DATA_SIZE, :]
 
 X_test = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test.npy')
 X_test = np.reshape(X_test, [10000, 20, 20])
 
 # ラベルデータ読み込み
 y_train = np.load('/mnt/c/Users/user/MyData/SonyDice/y_train.npy')
-y_train.shape
+# y_train = y_train[:TEST_DATA_SIZE]
 
 def getRect(img):
     '''画像に対して矩形領域を検知する関数'''
@@ -69,7 +62,7 @@ def getRect(img):
     return rect_center, rect_size, rect_angle, int(sum(rect_area))
 
 
-def getOneDiceIndexAndRect():
+def getOneDiceIndexAndRect(data_type):
     '''サイコロが一つの画像のindexとその矩形領域情報を返す
     Return:
         one_dice_index: インデックスのリスト
@@ -80,9 +73,23 @@ def getOneDiceIndexAndRect():
     rect_list = []
     have_small_piece_img_num = 0
 
-    for i in range(X_train.shape[0]):
-        img = X_train[i, :]
-        
+    if data_type == 'train':
+        X = X_train
+        data_size = X.shape[0]
+    elif data_type == 'test': 
+        X = X_test
+        data_size = X.shape[0]
+    elif data_type == 'test_two_dice':
+        # サイコロ2つの画像に対して分けた画像リストを入力
+        imgs = devideTwoDiceImage('test')
+        data_size = len(imgs)
+
+    for i in range(data_size):
+        if data_type == 'train' or data_type == 'test':
+            img = X[i, :]
+        elif data_type == 'test_two_dice':
+            img = imgs[i]
+
         # resize dinarization
         img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
         thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -91,8 +98,10 @@ def getOneDiceIndexAndRect():
 
         if rect_sum_area < ONE_DICE_THRESHOLD:
             # サイコロを一つだけ持つ画像のidxを記録
-            one_dice_idx.append(i)
+            if data_type != 'test_two_dice':
+                one_dice_idx.append(i)
         else:
+            assert data_type != 'test_two_dice', '分離したtest画像の面積の総和が閾値を超えています'
             # 画像内のサイコロの面積が閾値を超えていたら考えない
             continue
 
@@ -123,8 +132,10 @@ def getOneDiceIndexAndRect():
         assert dice_num == 1, 'サイコロが0個もしくは2個以上含まれます'
 
     # print(have_small_piece_img_num)
-
-    return one_dice_idx, rect_list
+    if data_type == 'train' or data_type == 'test':
+        return one_dice_idx, rect_list
+    elif data_type == 'test_two_dice':
+        return imgs, rect_list
 
 
 def getOneDiceImageInfoListFromRecWidth():
@@ -202,7 +213,7 @@ def getOneDiceImageInfoListFromRecWidth():
     return imgs, labels, labels_unexp, labels_undetect
 
 
-def getOneDiceImageInfoListFromArea():
+def getOneDiceImageInfoListFromArea(data_type):
     '''面積からサイコロを一つだけ存在する画像データとそのインデックスを作成
     Reurun:
         idx: サイコロを一つのみ持つ画像のidx
@@ -211,10 +222,15 @@ def getOneDiceImageInfoListFromArea():
     '''
     imgs = []
     labels = []
-    one_dice_idx, rect_list = getOneDiceIndexAndRect()
+    one_dice_idx, rect_list = getOneDiceIndexAndRect(data_type)
+
+    if data_type == 'train':
+        X = X_train
+    elif data_type == 'test':
+        X = X_test
 
     for i, img_idx in enumerate(one_dice_idx):
-        img = X_train[img_idx, :]
+        img = X[img_idx, :]
 
         # resize, binarization
         img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
@@ -237,17 +253,59 @@ def getOneDiceImageInfoListFromArea():
         img = cv2.resize(img, (IMAGE_ONE_DICE_SIZE, IMAGE_ONE_DICE_SIZE), interpolation=cv2.INTER_LANCZOS4)
 
         imgs.append(img.astype(np.uint8))
-        labels.append(y_train[img_idx])
+        
+        if data_type == 'train':
+            labels.append(y_train[img_idx])
 
     return one_dice_idx, imgs, labels
 
-def getOneDiceRotate90():
+
+def getDevidedImageInfoList():
+    '''testデータに対してサイコロを2つ持つ画像を分けた画像リストに対してサイコロ領域を切り取りリストとして返す関数'''
+    '''面積からサイコロを一つだけ存在する画像データとそのインデックスを作成
+    Reurun:
+        idx: サイコロを一つのみ持つ画像のidx
+        imgs: サイコロ部分を切り取ったの画像
+        labels: ラベル(目の数)
+    '''
+    imgs_output = []
+    
+    imgs, rect_list = getOneDiceIndexAndRect(data_type='test_two_dice')
+
+    for i, img in enumerate(imgs):
+
+        # resize, binarization
+        img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
+        thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        width, height = img.shape
+        center, size, angle = rect_list[i]
+        center, size = tuple(map(int, center)), tuple(map(int, size))
+
+        # 変換行列
+        trans = cv2.getRotationMatrix2D(center, angle, scale=1)
+        
+        # Rotation
+        img = cv2.warpAffine(img, trans, (width, height))
+
+        # Crop
+        img = cv2.getRectSubPix(img, size, center)
+
+        # resize lanczos
+        img = cv2.resize(img, (IMAGE_ONE_DICE_SIZE, IMAGE_ONE_DICE_SIZE), interpolation=cv2.INTER_LANCZOS4)
+
+        imgs_output.append(img.astype(np.uint8))
+
+    return imgs_output
+
+
+def getOneDiceRotate90(data_type):
     '''90°に回転させて画像を4倍にかさましする関数
     Return:
         imgs: かさましした画像リスト
         labels: かさまししたラベルリスト
     '''
-    _, imgs, labels = getOneDiceImageInfoListFromArea()
+    _, imgs, labels = getOneDiceImageInfoListFromArea(data_type)
 
     imgs_x4 = []
     labels_x4 = []
@@ -262,10 +320,62 @@ def getOneDiceRotate90():
         imgs_x4.append(img_rotate_180)
         imgs_x4.append(img_rotate_90_counterclockwise)
 
-        for j in range(4):
-            labels_x4.append(labels[i])
+        if data_type == 'train':
+            for j in range(4):
+                labels_x4.append(labels[i])
 
     return imgs_x4, labels_x4
+
+
+def devideTwoDiceImage(data_type='test'):
+    '''サイコロを2つ持つデータに対してサイコロをそれぞれ別々の2つの画像に分け画像のリストとして返す関数
+    Return:
+        imgs_list: 画像のリスト、長さは元の2倍
+        '''
+    imgs_list = []
+
+    one_dice_idx, _, _ = getOneDiceImageInfoListFromArea(data_type)
+
+    # 二つのサイコロを持つ画像のindex
+    two_dice_idx_test = []
+    cnt = 0
+    for i in range(len(X_test)):
+        if i == one_dice_idx[cnt]:
+            if i < one_dice_idx[-1]:
+                cnt += 1
+        else:
+            two_dice_idx_test.append(i)
+    
+    for i in two_dice_idx_test:
+        # 2つのサイコロを持つ画像
+        img = X_test[i, :]
+
+        dice_pix = []
+        for j in range(20):
+            for k in range(20):
+                if img[j, k] >= 10:
+                    dice_pix.append([j, k])
+        dice_pix = np.array(dice_pix)
+        
+        # spectral clustering
+        clustering = SpectralClustering(n_clusters=2, assign_labels='discretize', random_state=1, affinity='nearest_neighbors').fit(dice_pix)
+        
+        # 一つ目の画像
+        img_copy = img.copy()
+        for l, [x, y] in enumerate(dice_pix):
+            label = clustering.labels_[l]
+            if label == 0:
+                img_copy[x, y] = 1
+        imgs_list.append(img_copy)
+
+        img_copy = img.copy()
+        for m, [x, y] in enumerate(dice_pix):
+            label = clustering.labels_[m]
+            if label == 1:
+                img_copy[x, y] = 1
+        imgs_list.append(img_copy)
+
+    return imgs_list
 
 
 def myTransformer(img, label, data_type):
@@ -281,23 +391,21 @@ def myTransformer(img, label, data_type):
         ])
     
     img_t = img_transformer(img)
-    # onehot encodingで返す
-    label_t = torch.zeros(6, dtype=torch.long)
-    label_t[int(label-1)] = 1.0
+    label_t = torch.tensor(label-1, dtype=torch.long)
 
     return img_t, label_t
-
 
 
 class ImageDataset(Dataset):
     '''Dataset クラス
     Attributes:
-        data_type: Dataset のタイプ, 'trn', 'val', 'test'
+        data_type: Dataset のタイプ, 'trn', 'val'
     '''
     def __init__(self, data_type):
         self.data_type = data_type
         assert data_type in ['trn', 'val'], 'データタイプが想定外です'
-        imgs, labels = getOneDiceRotate90()
+        # 与えられた訓練データ(200000枚から選んだもの)
+        imgs, labels = getOneDiceRotate90(data_type='train')
 
         trn_imgs, val_imgs, trn_labels, val_labels = \
             train_test_split(imgs, labels, train_size=0.8, stratify=labels, random_state=1)
@@ -315,12 +423,12 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         if self.data_type == 'trn':
             img = self.imgs[idx]
-            img = img.astype(np.unit8)
+            img = img.astype(np.uint8)
             label = self.labels[idx]
             img_t, label_t = myTransformer(img, label, self.data_type)
         elif self.data_type == 'val':
             img = self.imgs[idx]
-            img = img.astype(np.unit8)
+            img = img.astype(np.uint8)
             label = self.labels[idx]
             img_t, label_t = myTransformer(img, label, self.data_type)
         
