@@ -21,7 +21,6 @@ warnings.filterwarnings('ignore')
 IMAGE_ONE_DICE_SIZE = 32 # 一つのサイコロの最終的な画像のサイズ
 IMAGE_EXPAND_SIZE = 256 # 20x20pixから拡大処理(otsu resize)するサイズ
 ONE_DICE_THRESHOLD = 12000
-NOISE_THRESHOLD = 3000
 # TEST_DATA_SIZE = 10000 # テスト用全部読み込んでると時間がもったいないため
 
 # 画像データ読み込み
@@ -33,7 +32,7 @@ X_test = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test.npy')
 X_test = np.reshape(X_test, [10000, 20, 20])
 
 # 10/27に更新されたデータ
-X_test_renew = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test_renew.npy')
+X_test_renew = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test.npy')
 X_test_renew = np.reshape(X_test_renew, [-1, 20, 20])
 
 # ラベルデータ読み込み
@@ -58,78 +57,13 @@ def getRect(img):
         
         # 検出した矩形の合計面積を求める
         tmp_area = cv2.contourArea(contour)
-        # ノイズの閾値よりも面積が大きければ
-        if tmp_area > NOISE_THRESHOLD:
-            rect_area.append(tmp_area)
+        rect_area.append(tmp_area)
 
         rect_center.append(rect[0])
         rect_size.append(rect[1])
         rect_angle.append(rect[2])
     
     return rect_center, rect_size, rect_angle, int(sum(rect_area))
-
-
-def getIdxForEachKindOfDice():
-    '''サイコロの種類によってそれぞれのインデックスを返す関数
-    Returne:
-        one_dice_idx : 1つのサイコロを持つ画像のインデックス
-        two_dice_idx : 2つのサイコロを持つ画像のインデックス
-        three_dice_idx : 3つのサイコロを持つ画像のインデックス
-    '''
-
-    one_dice_idx = []
-    two_dice_idx = []
-    three_dice_idx = []
-
-    X = X_test_renew
-
-    for i, img in enumerate(X_test_renew):
-
-        # resize dinarization
-        img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
-        thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        rect_center, rect_size, rect_angle, rect_sum_area = getRect(img)
-
-        if rect_sum_area < ONE_DICE_THRESHOLD:
-            # サイコロの面積に応じてindexを記録
-            one_dice_idx.append(i)
-        else:
-            assert data_type != 'test_two_dice', '分離したtest画像の面積の総和が閾値を超えています'
-            # 画像内のサイコロの面積が閾値を超えていたら考えない
-            continue
-
-        # 目いっぱいclosing
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel, iterations=5)
-
-        contours, _ = cv2.findContours(image=img, # lanczosを使う
-                                       mode=cv2.RETR_EXTERNAL, # 一番外側の輪郭のみ
-                                       method=cv2.CHAIN_APPROX_SIMPLE) # 輪郭座標の詳細なし
-        dice_num = 0
-        have_small_piece = False
-        for contour in contours:
-            
-            # 傾いた外接する矩形領域
-            rect = cv2.minAreaRect(contour)
-
-            if (80 <= rect[1][0] <= 150) and (80 <= rect[1][1] <= 150):
-                rect_list.append(rect)
-                dice_num += 1
-            else:
-                have_small_piece = True
-
-        if have_small_piece:
-            have_small_piece_img_num += 1
-            have_small_piece = False
-                
-        assert dice_num == 1, 'サイコロが0個もしくは2個以上含まれます'
-
-    # print(have_small_piece_img_num)
-    if data_type == 'train' or data_type == 'test':
-        return one_dice_idx, rect_list
-    elif data_type == 'test_two_dice':
-        return imgs, rect_list
 
 
 def getOneDiceIndexAndRect(data_type):
