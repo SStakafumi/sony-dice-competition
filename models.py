@@ -1,5 +1,6 @@
 import torch.nn as nn
 from torchvision import models
+# from transforms import CLIPProcessor, CLIPModel
 
 class RegNetWrapper(nn.Module):
     def __init__(self):
