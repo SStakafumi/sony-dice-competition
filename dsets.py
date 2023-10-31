@@ -541,15 +541,9 @@ class ImageDataset(Dataset):
         return len(self.imgs)
     
     def __getitem__(self, idx):
-        if self.data_type == 'trn':
-            img = self.imgs[idx]
-            img = img.astype(np.uint8)
-            label = self.labels[idx]
-            img_t, label_t = myTransformer(img, label, self.data_type)
-        elif self.data_type == 'val':
-            img = self.imgs[idx]
-            img = img.astype(np.uint8)
-            label = self.labels[idx]
-            img_t, label_t = myTransformer(img, label, self.data_type)
+        img = self.imgs[idx]
+        img = img.astype(np.uint8)
+        label = self.labels[idx]
+        img_t, label_t = myTransformer(img, label, self.data_type)
         
         return img_t, label_t
