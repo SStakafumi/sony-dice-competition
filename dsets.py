@@ -20,9 +20,10 @@ warnings.filterwarnings('ignore')
 # 定数設定
 IMAGE_ONE_DICE_SIZE = 32 # 一つのサイコロの最終的な画像のサイズ
 IMAGE_EXPAND_SIZE = 256 # 20x20pixから拡大処理(otsu resize)するサイズ
-THRESHOLD_BETWEEN12_TRAIN = 12000 # 訓練データのサイコロ１つと２つの面積の閾値
-THRESHOLD_BETWEEN12 = 13000
-THRESHOLD_BETWEEN23= 23000
+THRESHOLD_BETWEEN12_TRAIN= THRESHOLD_BETWEEN12_DENOISED = 12000 # 訓練データのサイコロ１つと２つの面積の閾値
+THRESHOLD_BETWEEN12 = 13000 
+THRESHOLD_BETWEEN23= 23000 
+THRESHOLD_BETWEEN23_DENOISED = 20000 # _DENOISEはUNetであらかじめ処理したもの
 TWO_DICE_IDX = [15654, 19878, 21817, 22329]
 THREE_DICE_IDX = [1995, 3422, 12838, 21186, 21866, 24648, 7393, 11275, 11613, 12234, 13481, 23319, 24588,
                   362, 614, 1203, 1355, 5042, 5144, 6027, 7332, 8318, 8616, 12503, 12676, 15231, 16003, 
@@ -39,26 +40,36 @@ X_train = np.reshape(X_train, [200000, 20, 20])
 X_test = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test_renew.npy')
 X_test = np.reshape(X_test, [-1, 20, 20])
 
+# UNetでデノイズされたデータを読み取る
+X_test_denoised = np.load('/mnt/c/Users/user/MyData/SonyDice/X_test_denoised_by_UNet.npy')
+
 # ラベルデータ読み込み
 y_train = np.load('/mnt/c/Users/user/MyData/SonyDice/y_train.npy')
 # y_train = y_train[:TEST_DATA_SIZE]
 
 def getDiceSumArea(img, data_type):
-    '''入力された画像に含まれるサイコロの面積の総和を返す関数(testデータに対してはノイズを除去)'''
+    '''入力された画像に含まれるサイコロの面積の総和を返す関数 (testデータに対してはノイズを除去)
+    
+    args: 
+        img(ndarray): resize->binarizationされた画像
+        dtata_type(str): trn, val, test, test_denoisedのどれか
+    
+    Returns:
+        sum_area_dice(int): 画像に含まれるサイコロの面積の総和
+        '''
 
-    assert data_type in ['trn', 'val', 'test'], 'データタイプを確認してください'
+    assert data_type in ['trn', 'val', 'test', 'test_denoised'], 'データタイプを確認してください'
 
     contours, _ = cv2.findContours(image=img,
                                    mode=cv2.RETR_EXTERNAL, # 一番外側の輪郭のみ
                                    method=cv2.CHAIN_APPROX_SIMPLE) # 輪郭座標の詳細なし
     
     rect_area = []
-
     for contour in contours:  
         # 検出した矩形の合計面積を求める
         tmp_area = cv2.contourArea(contour)
         
-        if data_type == 'trn' or data_type == 'val':
+        if data_type in ['trn', 'val', 'test_denoised']:
             rect_area.append(tmp_area)
         # testデータではノイズを考えるため, ノイズの閾値よりも面積が大きければ面積リストに追加する
         elif data_type == 'test':
@@ -79,7 +90,7 @@ def getIndexForEachDice(data_type):
         three_dice_idx : 3つのサイコロを持つ画像のインデックス
     '''
 
-    assert data_type == 'trn' or data_type == 'test', 'データタイプを確認してください'
+    assert data_type in ['trn', 'test', 'test_denoised'], 'データタイプを確認してください'
 
     one_dice_idx = []
     two_dice_idx = []
@@ -91,6 +102,7 @@ def getIndexForEachDice(data_type):
         for i in range(X.shape[0]):
             img = X[i, :]
 
+            # denoise -> resize(lanczos4)
             img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
             thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
@@ -135,7 +147,28 @@ def getIndexForEachDice(data_type):
         # sort
         two_dice_idx = sorted(two_dice_idx)
         three_dice_idx = sorted(three_dice_idx)
-    
+
+    elif data_type == 'test_denoised':
+        X = X_test_denoised
+
+        for i in range(X.shape[0]):
+            img = X[i, :]
+
+            # すでにデノイズされているためここではcv2.fastNlMeansDenoisingはしない
+            # denoise -> resize(lanczos4)
+            img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
+            thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # 画像に含まれるサイコロの面積の総和を求める
+            sum_area_dice = getDiceSumArea(img, data_type)
+
+            if sum_area_dice < THRESHOLD_BETWEEN12_DENOISED:
+                # サイコロを一つだけ持つ画像のidxを記録
+                one_dice_idx.append(i)
+            elif sum_area_dice < THRESHOLD_BETWEEN23_DENOISED:
+                two_dice_idx.append(i)
+            else:
+                three_dice_idx.append(i)
 
     # trainデータの場合はthree_dice_idxは空
     return one_dice_idx, two_dice_idx, three_dice_idx
@@ -146,7 +179,7 @@ def getOneDiceImage(idx, data_type, get_label=False):
     Return:
         imgs_list: 分離された画像(ndarray)のリスト (20*20)'''
 
-    assert data_type in ['trn', 'test'], '画像のタイプを確認してください'
+    assert data_type in ['trn', 'test', 'test_denoised'], '画像のタイプを確認してください'
 
     imgs_list = []
     labels_list = []
@@ -155,6 +188,8 @@ def getOneDiceImage(idx, data_type, get_label=False):
         X = X_train
     elif data_type == 'test':
         X = X_test
+    elif data_type == 'test_denoised':
+        X = X_test_denoised
     
     for i in idx:
         img = X[i, :]
@@ -181,7 +216,7 @@ def devideTwoImage(idx, data_type):
     Return:
         imgs_list: 分離された画像(ndarray)のリスト, 長さは元の2倍, (20*20)'''
     
-    assert data_type in ['trn', 'test'], '画像のタイプを確認してください'
+    assert data_type in ['trn', 'test', 'test_denoised'], '画像のタイプを確認してください'
 
     imgs_list = []
 
@@ -189,6 +224,8 @@ def devideTwoImage(idx, data_type):
         X = X_train
     elif data_type == 'test':
         X = X_test
+    elif data_type == 'test_denoised':
+        X = X_test_denoised
 
     for i in idx:
         img = X[i, :]
@@ -234,15 +271,21 @@ def devideThreeImage(idx, data_type):
     Return:
         imgs_list: デノイズ処理された分離された画像(ndarray)のリスト, 長さは元の3倍, (20*20)'''
     
-    assert data_type == 'test', 'この関数はテストデータしか受け付けません. データのタイプを確認してください'
+    assert data_type in ['test', 'test_denoised'], 'この関数はテストデータしか受け付けません'
 
     imgs_list = []
 
+    if data_type == 'test':
+        X = X_test
+    elif data_type == 'test_denoised':
+        X = X_test_denoised
+
     for i in idx:
-        img = X_test[i, :]
+        img = X[i, :]
 
         # デノイズ
-        img = cv2.fastNlMeansDenoising(src=img, h=30, templateWindowSize=3, searchWindowSize=7)
+        if data_type == 'test':
+            img = cv2.fastNlMeansDenoising(src=img, h=30, templateWindowSize=3, searchWindowSize=7)
 
         dice_pix = []
         for j in range(20):
@@ -254,7 +297,7 @@ def devideThreeImage(idx, data_type):
         # spectral clustering
         clustering = SpectralClustering(n_clusters=3, 
                                         assign_labels='discretize', 
-                                        random_state=1, 
+                                        random_state=2, 
                                         affinity='nearest_neighbors').fit(dice_pix)
         
         # 一つ目の画像
@@ -294,7 +337,7 @@ def devideImage(data_type, one_dice_only=True):
     '''
     
     if data_type == 'trn':
-        one_dice_idx, two_dice_idx, _ = getIndexForEachDice(data_type='trn')
+        one_dice_idx, two_dice_idx, _ = getIndexForEachDice(data_type)
         if one_dice_only:
             imgs_list = getOneDiceImage(one_dice_idx, data_type)
         else:
@@ -302,7 +345,13 @@ def devideImage(data_type, one_dice_only=True):
                 + devideTwoImage(two_dice_idx, data_type)
 
     elif data_type == 'test':
-        one_dice_idx, two_dice_idx, three_dice_idx = getIndexForEachDice(data_type='test')
+        one_dice_idx, two_dice_idx, three_dice_idx = getIndexForEachDice(data_type)
+        imgs_list = getOneDiceImage(one_dice_idx, data_type) \
+            + devideTwoImage(two_dice_idx, data_type) \
+            + devideThreeImage(three_dice_idx, data_type)
+    
+    elif data_type == 'test_denoised':
+        one_dice_idx, two_dice_idx, three_dice_idx = getIndexForEachDice(data_type)
         imgs_list = getOneDiceImage(one_dice_idx, data_type) \
             + devideTwoImage(two_dice_idx, data_type) \
             + devideThreeImage(three_dice_idx, data_type)
@@ -314,17 +363,19 @@ def devideImage(data_type, one_dice_only=True):
 def getOneDiceRectanglar(img, data_type):
     '''サイコロが一つの画像の矩形領域情報を返す
 
-    input:
-        img: 20*20の画像(testデータの場合デノイズされたものを入れる)
-        data_type: 'trn' か 'test'
+    args:
+        img(ndarray): 20*20の画像(testデータの場合デノイズされたものを入れる)
+        data_type(str): trn, test, test_denoised
 
     Return:
-        contour: サイコロの輪郭情報
+        contour(list): サイコロの輪郭情報, [(center_y, center_x), (height, width), angle]
+        mt_2_dice(bool): 画像内にサイコロが2個以上検出された時True
+        zero_dice(bool): 画像内にサイコロが検出されなかった時True
     '''
 
-    assert data_type in ['trn', 'test']
+    assert data_type in ['trn', 'test', 'test_denoised']
 
-    # resize dinarization
+    # resize binarization
     img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
     thresh, img = cv2.threshold(img, thresh=0, maxval=255, type=cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -354,16 +405,23 @@ def getOneDiceRectanglar(img, data_type):
             dice_num += 1
         else:
             unexp_rects.append(rect)
-
     
-    if data_type == 'train':
+    # debug
+    mt2_dice = False
+    zero_dice = False
+    if dice_num >= 2:
+        mt2_dice = True
+    if dice_num == 0:
+        zero_dice = True
+    
+    if data_type == 'trn':
         assert dice_num == 1, '検出されたサイコロの数が0, もしくは2個以上あります.'
         dice_rect = dice_rects[0]
     
-    elif data_type == 'test':
+    elif data_type in ['test', 'test_denoised']:
         if len(dice_rects) == 1:
             dice_rect = dice_rects[0]
-        # 2個あったら矩形の面積が大きいほう
+        # 2個以上あったら矩形の面積が大きいほう
         elif len(dice_rects) >= 2:
             max_area = -1
             for i, tmp in enumerate(dice_rects):
@@ -384,7 +442,7 @@ def getOneDiceRectanglar(img, data_type):
                 if tmp_area > max_area:
                     dice_rect = unexp_rects[i]
 
-    return dice_rect
+    return *dice_rect, mt2_dice, zero_dice
 
 
 def getCroppedImgInfoList(data_type):
@@ -397,7 +455,7 @@ def getCroppedImgInfoList(data_type):
         labels: サイコロのラベル(目), trainデータのみ    
     '''
 
-    assert data_type in ['trn', 'test']
+    assert data_type in ['trn', 'test', 'test_denoised']
 
     imgs_output = []
     
@@ -409,7 +467,7 @@ def getCroppedImgInfoList(data_type):
         for img in imgs:
             
             # 20*20 の画像に対して
-            center, size, angle = getOneDiceRectanglar(img, data_type)
+            center, size, angle, _, _ = getOneDiceRectanglar(img, data_type)
             center, size = tuple(map(int, center)), tuple(map(int, size))
 
             # resize, binarization
@@ -434,15 +492,19 @@ def getCroppedImgInfoList(data_type):
 
         return imgs_output, labels
     
-    if data_type == 'test':
+    if data_type in ['test', 'test_denoised']:
         # デノイズ処理され分離され画像内に一つしかサイコロがない状態となった画像リスト
         imgs = devideImage(data_type)
 
-        for img in imgs:
-            
+        mt2_dice_num = []
+        zero_dice_num = []
+
+        for img in imgs:   
             # 20*20 の画像に対して
-            center, size, angle = getOneDiceRectanglar(img, data_type)
+            center, size, angle, mt2_dice, zero_dice = getOneDiceRectanglar(img, data_type)
             center, size = tuple(map(int, center)), tuple(map(int, size))
+            mt2_dice_num.append(mt2_dice)
+            zero_dice_num.append(zero_dice)
 
             # resize, binarization
             img = cv2.resize(img, (IMAGE_EXPAND_SIZE, IMAGE_EXPAND_SIZE), interpolation=cv2.INTER_LANCZOS4)
@@ -464,8 +526,11 @@ def getCroppedImgInfoList(data_type):
 
             imgs_output.append(img.astype(np.uint8))
 
-        return imgs_output
+        # debug
+        print(f'サイコロが2つ以上あると判定された画像の枚数: {sum(mt2_dice_num)}')
+        print(f'サイコロが0個であると判定された画像の枚数: {sum(zero_dice_num)}')
 
+        return imgs_output
 
 def getOneDiceRotate90(data_type):
     '''90°に回転させて画像を4倍にかさましする関数
