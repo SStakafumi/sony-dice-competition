@@ -1,5 +1,6 @@
 import math
 
+import torch
 import torch.nn as nn
 from torchvision import models
 
@@ -77,3 +78,116 @@ class UNetWrapper(nn.Module):
         un_output = self.unet(bn_output)
         fn_output = self.final(un_output)
         return fn_output
+    
+
+class DoubleConv(nn.Module):
+    """DoubleConv is a basic building block of the encoder and decoder components.
+    Consists of two convolutional layers followed by a ReLU activation function.
+    """
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConv, self).__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x = self.double_conv(x)
+        return x
+
+
+class NConv(nn.Module):
+    """DoubleConv is a basic building block of the encoder and decoder components.
+    Consists of two convolutional layers followed by a ReLU activation function.
+    """
+    def __init__(self, in_channels, out_channels, n=3):
+        super().__init__()
+        n_conv = [
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        ]
+        for i in range(1, n):
+            n_conv.extend([
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+            ])
+
+        self.n_conv = nn.Sequential(*n_conv)
+
+    def forward(self, x):
+        x = self.n_conv(x)
+        return x
+
+
+class Down(nn.Module):
+    """Downscaling.
+    Consists of two consecutive DoubleConv blocks followed by a max pooling operation.
+    """
+    def __init__(self, in_channels, out_channels, n=2):
+        super(Down, self).__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            NConv(in_channels, out_channels, n)
+        )
+
+    def forward(self, x):
+        x = self.maxpool_conv(x)
+        return x
+
+
+class Up(nn.Module):
+    """Upscaling.
+    Performed using transposed convolution and concatenation of feature maps from the corresponding "Down" operation.
+    """
+    def __init__(self, in_channels, out_channels, bilinear=True, n=2):
+        super(Up, self).__init__()
+
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = NConv(in_channels, out_channels, n=n)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = NConv(in_channels, out_channels, n=n)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+
+        # input tensor shape: (batch_size, channels, height, width)
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = nn.functional.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        x = torch.cat([x2, x1], dim=1)
+        x = self.conv(x)
+        return x
+
+
+class UNet(nn.Module):
+    def __init__(self, n_channels=1, n_classes=1, bilinear=False, n=2):
+        super(UNet, self).__init__()
+        self.inc = (NConv(n_channels, 64, n=n))
+        self.down1 = Down(64, 128, n=n)
+        factor = 2 if bilinear else 1
+        self.down2 = Down(128, 256 // factor, n=n)
+
+        self.up1 = Up(256, 128 // factor, bilinear, n=n)
+        self.up2 = Up(128, 64 // factor, bilinear, n=n)
+        self.outc = nn.Conv2d(64, n_classes, 1)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+
+        x = self.up1(x3, x2)
+        x = self.up2(x, x1)
+        x = self.outc(x)
+
+        return x
